@@ -1473,6 +1473,12 @@ kmp_int32
 __kmpc_omp_reg_task_with_affinity(ident_t *loc_ref, kmp_int32 gtid,
                                   kmp_task_t *new_task, kmp_int32 naffins,
                                   kmp_task_affinity_info_t *affin_list) {
+  char cur_str[1024];
+  sprintf(cur_str, "T#%02d: Affinity for Task %p -> naffins=%d -> ", gtid, new_task, naffins);
+  for(int i = 0; i < naffins; i++) {
+      sprintf(cur_str + strlen(cur_str), "addr=%ld len=%ld, ", affin_list->base_addr, affin_list->len);
+  }
+  fprintf(stderr, "%s\n", cur_str);
   return 0;
 }
 
