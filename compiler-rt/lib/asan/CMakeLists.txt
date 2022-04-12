@@ -11,6 +11,7 @@ set(ASAN_SOURCES
   asan_fuchsia.cpp
   asan_globals.cpp
   asan_globals_win.cpp
+  asan_h2m_pattern_detection.cpp
   asan_interceptors.cpp
   asan_interceptors_memintrinsics.cpp
   asan_linux.cpp
@@ -56,6 +57,7 @@ SET(ASAN_HEADERS
   asan_fake_stack.h
   asan_flags.h
   asan_flags.inc
+  asan_h2m_pattern_detection.h
   asan_init_version.h
   asan_interceptors.h
   asan_interceptors_memintrinsics.h

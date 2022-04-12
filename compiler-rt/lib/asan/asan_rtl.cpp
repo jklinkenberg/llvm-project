@@ -13,6 +13,7 @@
 
 #include "asan_activation.h"
 #include "asan_allocator.h"
+#include "asan_h2m_pattern_detection.h"
 #include "asan_interceptors.h"
 #include "asan_interface_internal.h"
 #include "asan_internal.h"
@@ -146,6 +147,7 @@ ASAN_REPORT_ERROR_N(load, false)
 ASAN_REPORT_ERROR_N(store, true)
 
 #define ASAN_MEMORY_ACCESS_CALLBACK_BODY(type, is_write, size, exp_arg, fatal) \
+    h2m_pd_add_mem_access((void*)addr, size, is_write);                        \
     if (SANITIZER_MYRIAD2 && !AddrIsInMem(addr) && !AddrIsInShadow(addr))      \
       return;                                                                  \
     uptr sp = MEM_TO_SHADOW(addr);                                             \
