@@ -250,14 +250,14 @@ void output_accesses_per_allocation(std::map<void*, std::vector<h2m_pd_entry_t>>
         printf("H2M PD - Mem Accesses for Registered Alloc: %p with size=%lld\n", a.ptr, a.size);
 #endif // H2M_PD_DEBUG
         for(h2m_pd_entry_t &e : accs) {
-            tmp_file    << e.ts << ";"
+            tmp_file    << std::to_string(e.ts) << ";"
                         << (long)e.tid << ";"
                         << e.ptr << ";"
                         << (unsigned long)e.ptr << ";"
                         << e.size << ";"
                         << e.is_write << std::endl;
 #if H2M_PD_DEBUG
-            printf("   H2M PD - Access: ts=%f, tid=%lld, ptr=%p, size=%lld, is_write=%d\n", e.ts, (long)e.tid, e.ptr, e.size, e.is_write);
+            printf("   H2M PD - Access: ts=%s, tid=%lld, ptr=%p, size=%lld, is_write=%d\n", std::to_string(e.ts), (long)e.tid, e.ptr, e.size, e.is_write);
 #endif // H2M_PD_DEBUG
         }
         tmp_file.close();
