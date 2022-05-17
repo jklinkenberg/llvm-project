@@ -28,12 +28,16 @@
 #endif
 
 typedef struct h2m_pd_base_allocation_t {
+    int id;
     void *ptr;
     size_t size;
+    size_t dt_size;
     unsigned long range_start;
     unsigned long range_end;
+    double ts_alloc;
+    double ts_free;
     std::string name;
-    size_t dt_size;
+    std::string callsite;
 } h2m_pd_base_allocation_t;
 
 typedef struct h2m_pd_entry_t {
@@ -55,6 +59,7 @@ std::vector<h2m_pd_base_allocation_t>   list_allocs;
 
 // thread handling
 int global_num_threads;
+std::atomic<int>                        __alloc_counter(0);
 std::atomic<int>                        __thread_counter(0);
 __thread int                            __h2m_pd_gtid = -1;
 h2m_pd_thread_data_t*                   __thread_data = nullptr;
@@ -100,17 +105,34 @@ int h2m_pd_register_allocation(void *ptr, size_t size, const char* name, size_t 
     }
 
     h2m_pd_base_allocation_t e;
+    e.id            = __alloc_counter++;
     e.ptr           = ptr;
     e.size          = size;
-    e.range_start   = (unsigned long) ptr;
-    e.range_end     = e.range_start + size;
-    e.name          = std::string(name);
     e.dt_size       = dt_size;
+    e.range_start   = (unsigned long) ptr;
+    e.range_end     = e.range_start + size;    
+    e.name          = std::string(name);
+    e.ts_alloc      = h2m_pd_mysecond();
+    e.ts_free       = -1;
+    
 
     mtx_allocs.lock();
     list_allocs.push_back(e);
     mtx_allocs.unlock();
     return H2M_PD_SUCCESS;
+}
+
+int h2m_pd_unregister_allocation(void *ptr) {
+    mtx_allocs.lock();
+    for (h2m_pd_base_allocation_t &e : list_allocs) {
+        if(ptr == e.ptr && e.ts_free == -1) {
+            e.ts_free = h2m_pd_mysecond();
+            mtx_allocs.unlock();
+            return H2M_PD_SUCCESS;
+        }
+    }
+    mtx_allocs.unlock();
+    return H2M_PD_FAILURE;
 }
 
 int h2m_pd_add_mem_access(void *ptr, size_t size, int is_write) {
@@ -130,16 +152,19 @@ int h2m_pd_add_mem_access(void *ptr, size_t size, int is_write) {
     return H2M_PD_SUCCESS;
 }
 
-int h2m_pd_access_is_registered(unsigned long start, unsigned long end) {
+int h2m_pd_access_is_registered(h2m_pd_entry_t acc) {
+    unsigned long start = (unsigned long) acc.ptr;
+    unsigned long end   = start + acc.size;
+
     mtx_allocs.lock();
     for (h2m_pd_base_allocation_t &e : list_allocs) {
-        if( start >= e.range_start &&
-            start <= e.range_end &&
-            end >= e.range_start &&
-            end <= e.range_end) {
+        if( start >= e.range_start && start <= e.range_end &&
+            end >= e.range_start && end <= e.range_end) {
 
-            mtx_allocs.unlock();
-            return 1;
+            if (acc.ts >= e.ts_alloc && (e.ts_free == -1 || acc.ts <= e.ts_free)) {
+                mtx_allocs.unlock();
+                return 1;
+            }
         }
     }
     mtx_allocs.unlock();
@@ -147,31 +172,35 @@ int h2m_pd_access_is_registered(unsigned long start, unsigned long end) {
 }
 
 // Assumption: Only called in finalize from serial region (no thread safety)
-h2m_pd_base_allocation_t* h2m_pd_find_registered_alloc(unsigned long start, unsigned long end) {
+h2m_pd_base_allocation_t* h2m_pd_find_registered_alloc(h2m_pd_entry_t acc) {
+    unsigned long start = (unsigned long) acc.ptr;
+    unsigned long end   = start + acc.size;
+
     for (h2m_pd_base_allocation_t &e : list_allocs) {
-        if( start >= e.range_start &&
-            start <= e.range_end &&
-            end >= e.range_start &&
-            end <= e.range_end) {
-            return &e;
+        if( start >= e.range_start && start <= e.range_end &&
+            end >= e.range_start && end <= e.range_end) {
+            
+            if (acc.ts >= e.ts_alloc && (e.ts_free == -1 || acc.ts <= e.ts_free)) {
+                return &e;
+            }
         }
     }
     return nullptr;
 }
 
-std::map<void*, std::vector<h2m_pd_entry_t>> get_accesses_per_allocation () {
-    std::map<void*, std::vector<h2m_pd_entry_t>> mapping;
-    for(h2m_pd_base_allocation_t &a : list_allocs) {
-        mapping[a.ptr] = std::vector<h2m_pd_entry_t>();
+std::map<int, std::vector<h2m_pd_entry_t>> get_accesses_per_allocation () {
+    // init mapping lists
+    std::map<int, std::vector<h2m_pd_entry_t>> mapping;
+    for(h2m_pd_base_allocation_t &alloc : list_allocs) {
+        mapping[alloc.id] = std::vector<h2m_pd_entry_t>();
     }
 
+    // loop through memory accesses for every thread
     for (int i = 0; i < global_num_threads; i++) {
         for (h2m_pd_entry_t &acc : __thread_data[i].mem_accesses) {
-            unsigned long tmp_s = (unsigned long) acc.ptr;
-            unsigned long tmp_e = tmp_s + acc.size;
-            h2m_pd_base_allocation_t *found = h2m_pd_find_registered_alloc(tmp_s, tmp_e);
+            h2m_pd_base_allocation_t *found = h2m_pd_find_registered_alloc(acc);
             if(found) {
-                mapping[found->ptr].push_back(acc);
+                mapping[found->id].push_back(acc);
             }
         }
     }
@@ -192,9 +221,7 @@ void print_global_stats() {
     for (int i = 0; i < global_num_threads; i++) {
         n_accesses += __thread_data[i].mem_accesses.size();
         for (h2m_pd_entry_t &acc : __thread_data[i].mem_accesses) {
-            unsigned long tmp_s = (unsigned long) acc.ptr;
-            unsigned long tmp_e = tmp_s + acc.size;
-            if(h2m_pd_access_is_registered(tmp_s, tmp_e)) {
+            if(h2m_pd_access_is_registered(acc)) {
                 n_accesses_relevant++;
 #if H2M_PD_DEBUG
                 printf("H2M PD - Mem Access: ts=%f, tid=%lld (check=%d, gtid=%d), ptr=%p, size=%lld, is_write=%d\n", acc.ts, (long)acc.tid, __thread_data[i].os_thread_id, i, acc.ptr, acc.size, acc.is_write);
@@ -207,7 +234,7 @@ void print_global_stats() {
     printf("H2M PD - Overall # of relevant memory accesses: %lld\n\n", n_accesses_relevant);
 }
 
-void output_accesses_per_allocation(std::map<void*, std::vector<h2m_pd_entry_t>> mapping) {
+void output_accesses_per_allocation(std::map<int, std::vector<h2m_pd_entry_t>> mapping) {
     // get path from environment variable to decide whether to write to files
     char *pathname = std::getenv("H2M_PD_OUT_DIR");
     if(!pathname) {
@@ -227,7 +254,7 @@ void output_accesses_per_allocation(std::map<void*, std::vector<h2m_pd_entry_t>>
     }
 
     for(h2m_pd_base_allocation_t &a : list_allocs) {
-        std::string tmp_path = std::string(pathname) + "/" + a.name + ".txt";
+        std::string tmp_path = std::string(pathname) + "/alloc_" + std::to_string(a.id) + ".txt";
         std::ofstream tmp_file(tmp_path);
         if(!tmp_file.is_open()) {
             fprintf(stderr, "WARNING: Could not open/write file %s.\n", tmp_path.c_str());
@@ -235,17 +262,19 @@ void output_accesses_per_allocation(std::map<void*, std::vector<h2m_pd_entry_t>>
         }
 
         // write meta information for current allocation
-        tmp_file    << "Address;" << a.ptr << ";"
+        tmp_file    << "BaseAddress;" << a.ptr << ";"
                     << "Size;" << a.size << ";" 
-                    << "RangeStart;" << a.range_start << ";"
-                    << "RangeEnd;" << a.range_end << ";"
                     << "DataTypeSize;" << a.dt_size << ";"
+                    << "RangeStart;" << std::to_string(a.range_start) << ";"
+                    << "RangeEnd;" << std::to_string(a.range_end) << ";"
+                    << "TsAlloc;" << std::to_string(a.ts_alloc) << ";"
+                    << "TsFree;" << std::to_string(a.ts_free) << ";"
                     << std::endl;
 
         // write header
         tmp_file << "TimeStamp;ThreadId;Address;AddressLong;Size;IsWrite" << std::endl;
 
-        std::vector<h2m_pd_entry_t> &accs = mapping[a.ptr];
+        std::vector<h2m_pd_entry_t> &accs = mapping[a.id];
 #if H2M_PD_DEBUG
         printf("H2M PD - Mem Accesses for Registered Alloc: %p with size=%lld\n", a.ptr, a.size);
 #endif // H2M_PD_DEBUG
@@ -268,7 +297,7 @@ int h2m_pd_finalize() {
     // ============================================================
     // ===== get mapping per allocation
     // ============================================================
-    std::map<void*, std::vector<h2m_pd_entry_t>> acc_per_alloc = get_accesses_per_allocation();
+    std::map<int, std::vector<h2m_pd_entry_t>> acc_per_alloc = get_accesses_per_allocation();
 
     // ============================================================
     // ===== output
