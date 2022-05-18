@@ -23,7 +23,7 @@ int h2m_pd_init(int n_threads);
 int h2m_pd_register_allocation(void *ptr, size_t size, const char* name, size_t dt_size);
 int h2m_pd_unregister_allocation(void *ptr);
 int h2m_pd_add_mem_access(void *ptr, size_t size, int is_write);
-int h2m_pd_access_is_registered(unsigned long start, unsigned long end);
+int h2m_pd_new_phase(const char* name);
 int h2m_pd_finalize();
 
 #endif // __ASAN_H2M_PATTERN_DETECTION_H__

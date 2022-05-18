@@ -27,6 +27,12 @@
 #define H2M_PD_DEBUG 0
 #endif
 
+typedef struct h2m_pd_phase_t {
+    std::string name;
+    double ts;
+    std::string call_site;
+} h2m_pd_phase_t;
+
 typedef struct h2m_pd_base_allocation_t {
     int id;
     void *ptr;
@@ -37,7 +43,7 @@ typedef struct h2m_pd_base_allocation_t {
     double ts_alloc;
     double ts_free;
     std::string name;
-    std::string callsite;
+    std::string call_site;
 } h2m_pd_base_allocation_t;
 
 typedef struct h2m_pd_entry_t {
@@ -57,10 +63,13 @@ typedef struct h2m_pd_thread_data_t {
 std::mutex                              mtx_allocs;
 std::vector<h2m_pd_base_allocation_t>   list_allocs;
 
+std::mutex                              mtx_phases;
+std::vector<h2m_pd_phase_t>             list_phases;
+
 // thread handling
 int global_num_threads;
-std::atomic<int>                        __alloc_counter(0);
-std::atomic<int>                        __thread_counter(0);
+std::atomic<int>                        __id_counter_alloc(0);
+std::atomic<int>                        __id_counter_threads(0);
 __thread int                            __h2m_pd_gtid = -1;
 h2m_pd_thread_data_t*                   __thread_data = nullptr;
 
@@ -79,7 +88,7 @@ int h2m_pd_get_gtid() {
     if(__h2m_pd_gtid != -1) {
         return __h2m_pd_gtid;
     }
-    __h2m_pd_gtid = __thread_counter++;
+    __h2m_pd_gtid = __id_counter_threads++;
 #if H2M_PD_DEBUG
     fprintf(stderr, "Current thread = %d\n", __h2m_pd_gtid);
 #endif // H2M_PD_DEBUG
@@ -95,6 +104,11 @@ int h2m_pd_init(int n_threads) {
     mtx_allocs.lock();
     list_allocs.clear();
     mtx_allocs.unlock();
+
+    mtx_phases.lock();
+    list_phases.clear();
+    mtx_phases.unlock();
+
     h2m_pd_is_initialized = 1;
     return H2M_PD_SUCCESS;
 }
@@ -105,13 +119,14 @@ int h2m_pd_register_allocation(void *ptr, size_t size, const char* name, size_t 
     }
 
     h2m_pd_base_allocation_t e;
-    e.id            = __alloc_counter++;
+    e.id            = __id_counter_alloc++;
     e.ptr           = ptr;
     e.size          = size;
     e.dt_size       = dt_size;
     e.range_start   = (unsigned long) ptr;
     e.range_end     = e.range_start + size;    
     e.name          = std::string(name);
+    e.call_site     = "";
     e.ts_alloc      = h2m_pd_mysecond();
     e.ts_free       = -1;
     
@@ -149,6 +164,19 @@ int h2m_pd_add_mem_access(void *ptr, size_t size, int is_write) {
 
     int gtid = h2m_pd_get_gtid();
     __thread_data[gtid].mem_accesses.push_back(e);
+    return H2M_PD_SUCCESS;
+}
+
+int h2m_pd_new_phase(const char* name) {
+    h2m_pd_phase_t p;
+    p.name      = std::string(name);
+    p.call_site = "";
+    p.ts        = h2m_pd_mysecond();
+
+    mtx_phases.lock();
+    list_phases.push_back(p);
+    mtx_phases.unlock();
+
     return H2M_PD_SUCCESS;
 }
 
@@ -208,15 +236,16 @@ std::map<int, std::vector<h2m_pd_entry_t>> get_accesses_per_allocation () {
 }
 
 void print_global_stats() {
-    printf("H2M PD - Overall # of memory allocation: %lld\n", list_allocs.size());
+    printf("H2M PD - Overall # of registered memory allocation: %lld\n", list_allocs.size());
+    printf("H2M PD - Overall # of phase transitions: %lld\n", list_phases.size());
 #if H2M_PD_DEBUG
     for (auto &al : list_allocs) {
         printf("H2M PD - Registered Alloc: %p with size=%lld\n", al.ptr, al.size);
     }
 #endif // H2M_PD_DEBUG
     
-    unsigned long n_accesses = 0;
-    unsigned long n_accesses_relevant = 0;
+    unsigned long n_accesses            = 0;
+    unsigned long n_accesses_relevant   = 0;
     
     for (int i = 0; i < global_num_threads; i++) {
         n_accesses += __thread_data[i].mem_accesses.size();
@@ -259,6 +288,12 @@ void output_accesses_per_allocation(std::map<int, std::vector<h2m_pd_entry_t>> m
         if(!tmp_file.is_open()) {
             fprintf(stderr, "WARNING: Could not open/write file %s.\n", tmp_path.c_str());
             continue;
+        }
+
+        // write phase transition information
+        tmp_file    << "PhaseName;CallSite;TimeStamp" << std::endl;
+        for(h2m_pd_phase_t &p : list_phases) {
+            tmp_file    << p.name << ";" << p.call_site << ";" << std::to_string(p.ts) << std::endl;
         }
 
         // write meta information for current allocation
