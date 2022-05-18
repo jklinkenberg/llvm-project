@@ -20,7 +20,7 @@ typedef enum h2m_pd_result_types_t {
 } h2m_pd_result_types_t;
 
 int h2m_pd_init(int n_threads);
-int h2m_pd_register_allocation(void *ptr, size_t size, const char* name, size_t dt_size);
+int h2m_pd_register_allocation(void *ptr, size_t size, size_t dt_size);
 int h2m_pd_unregister_allocation(void *ptr);
 int h2m_pd_add_mem_access(void *ptr, size_t size, int is_write);
 int h2m_pd_new_phase(const char* name);

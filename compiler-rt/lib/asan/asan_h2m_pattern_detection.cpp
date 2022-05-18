@@ -9,11 +9,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <fstream>
 #include <iostream>
 #include <list>
 #include <map>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -42,7 +44,6 @@ typedef struct h2m_pd_base_allocation_t {
     unsigned long range_end;
     double ts_alloc;
     double ts_free;
-    std::string name;
     std::string call_site;
 } h2m_pd_base_allocation_t;
 
@@ -59,6 +60,11 @@ typedef struct h2m_pd_thread_data_t {
     std::vector<h2m_pd_entry_t> mem_accesses;
 } h2m_pd_thread_data_t;
 
+typedef struct h2m_pd_stack_trace_t {
+    std::vector<void*>          list_trace_ptr;
+    std::vector<std::string>    list_loc;
+} h2m_pd_stack_trace_t;
+
 // FIXME: might need to use rw_lock if amount of data recorded grows too much
 std::mutex                              mtx_allocs;
 std::vector<h2m_pd_base_allocation_t>   list_allocs;
@@ -74,6 +80,77 @@ __thread int                            __h2m_pd_gtid = -1;
 h2m_pd_thread_data_t*                   __thread_data = nullptr;
 
 int h2m_pd_is_initialized = 0;
+
+void string_split(const std::string& str, std::vector<std::string>& list, char delim) {
+    std::stringstream ss(str);
+    std::string token;
+    while (std::getline(ss, token, delim)) {
+        list.push_back(token);
+    }
+}
+
+void exec(const char* cmd, char* buffer) {
+    FILE *fp;
+    char buf[255];
+    /* Open the command for reading. */
+    fp = popen(cmd, "r");
+    if (fp == NULL) {
+        printf("Failed to run command\n");
+        return;
+    }
+    /* Read the output a line at a time - output it. */
+    while (fgets(buf, sizeof(buf), fp) != NULL) {
+        strcat(buffer, buf);
+    }
+    /* close */
+    pclose(fp);
+}
+
+std::string get_current_exe_name() {
+    char exe[1024];
+    int ret;
+    ret = readlink("/proc/self/exe", exe, sizeof(exe)-1);
+    if(ret ==-1) {
+        fprintf(stderr,"ERRORRRRR\n");
+        exit(1);
+    }
+    exe[ret] = 0;
+    std::string exe_str(exe);
+    std::vector<std::string> vec;
+    string_split(exe_str, vec, '/');
+
+    return vec[vec.size()-1];
+}
+
+void get_stack_trace(h2m_pd_stack_trace_t* st) {
+    st->list_loc.clear();
+    st->list_trace_ptr.clear();
+
+    void *trace[16];
+    // char **messages = (char **)NULL;
+    int i, trace_size = 0;
+
+    trace_size  = backtrace(trace, 16);
+    // messages    = backtrace_symbols(trace, trace_size);
+    std::string exe_name = get_current_exe_name();
+    
+    // printf("[bt] Execution path:\n");
+    for (i = 0; i < trace_size; ++i) {
+        // printf("[bt] #%d %s\n", i, messages[i]);        
+        char syscom[256];
+        sprintf(syscom,"addr2line %p -e %s", trace[i], exe_name.c_str()); //last parameter is the name of this app
+
+        char buffer[1024];
+        buffer[0] = 0;
+        exec(syscom, buffer);
+
+        std::string call_site(buffer);
+        call_site.erase(std::remove(call_site.begin(), call_site.end(), '\n'), call_site.end());
+
+        st->list_loc.push_back(call_site);
+        st->list_trace_ptr.push_back(trace[i]);
+    }
+}
 
 double h2m_pd_mysecond() {
     struct timeval tp;
@@ -113,9 +190,9 @@ int h2m_pd_init(int n_threads) {
     return H2M_PD_SUCCESS;
 }
 
-int h2m_pd_register_allocation(void *ptr, size_t size, const char* name, size_t dt_size) {
+int h2m_pd_register_allocation(void *ptr, size_t size, size_t dt_size) {
     if (!h2m_pd_is_initialized) {
-        return H2M_PD_SUCCESS;
+        return H2M_PD_FAILURE;
     }
 
     h2m_pd_base_allocation_t e;
@@ -124,12 +201,18 @@ int h2m_pd_register_allocation(void *ptr, size_t size, const char* name, size_t 
     e.size          = size;
     e.dt_size       = dt_size;
     e.range_start   = (unsigned long) ptr;
-    e.range_end     = e.range_start + size;    
-    e.name          = std::string(name);
-    e.call_site     = "";
+    e.range_end     = e.range_start + size;
     e.ts_alloc      = h2m_pd_mysecond();
     e.ts_free       = -1;
-    
+
+    // get call site
+    h2m_pd_stack_trace_t* st = new h2m_pd_stack_trace_t();
+    get_stack_trace(st);
+    e.call_site  = st->list_loc.size() < 4 ? "" : std::string(st->list_loc[3]);
+#if H2M_PD_DEBUG
+    printf("New allocation: %p (%ld) -> %s\n", e.ptr, e.range_start, e.call_site.c_str());
+#endif
+    delete st;
 
     mtx_allocs.lock();
     list_allocs.push_back(e);
@@ -138,6 +221,10 @@ int h2m_pd_register_allocation(void *ptr, size_t size, const char* name, size_t 
 }
 
 int h2m_pd_unregister_allocation(void *ptr) {
+    if (!h2m_pd_is_initialized) {
+        return H2M_PD_FAILURE;
+    }
+    
     mtx_allocs.lock();
     for (h2m_pd_base_allocation_t &e : list_allocs) {
         if(ptr == e.ptr && e.ts_free == -1) {
@@ -152,7 +239,7 @@ int h2m_pd_unregister_allocation(void *ptr) {
 
 int h2m_pd_add_mem_access(void *ptr, size_t size, int is_write) {
     if (!h2m_pd_is_initialized) {
-        return H2M_PD_SUCCESS;
+        return H2M_PD_FAILURE;
     }
 
     h2m_pd_entry_t e;
@@ -168,10 +255,22 @@ int h2m_pd_add_mem_access(void *ptr, size_t size, int is_write) {
 }
 
 int h2m_pd_new_phase(const char* name) {
+    if (!h2m_pd_is_initialized) {
+        return H2M_PD_FAILURE;
+    }
+
     h2m_pd_phase_t p;
     p.name      = std::string(name);
-    p.call_site = "";
     p.ts        = h2m_pd_mysecond();
+
+    // get call site
+    h2m_pd_stack_trace_t* st = new h2m_pd_stack_trace_t();
+    get_stack_trace(st);
+    p.call_site  = st->list_loc.size() < 4 ? "" : std::string(st->list_loc[3]);
+#if H2M_PD_DEBUG
+    printf("New phase: %s (%f) -> %s\n", p.name.c_str(), p.ts, p.call_site.c_str());
+#endif
+    delete st;
 
     mtx_phases.lock();
     list_phases.push_back(p);
@@ -304,6 +403,7 @@ void output_accesses_per_allocation(std::map<int, std::vector<h2m_pd_entry_t>> m
                     << "RangeEnd;" << std::to_string(a.range_end) << ";"
                     << "TsAlloc;" << std::to_string(a.ts_alloc) << ";"
                     << "TsFree;" << std::to_string(a.ts_free) << ";"
+                    << "CallSite;" << a.call_site
                     << std::endl;
 
         // write header
@@ -329,6 +429,10 @@ void output_accesses_per_allocation(std::map<int, std::vector<h2m_pd_entry_t>> m
 }
 
 int h2m_pd_finalize() {
+    if (!h2m_pd_is_initialized) {
+        return H2M_PD_FAILURE;
+    }
+
     // ============================================================
     // ===== get mapping per allocation
     // ============================================================
