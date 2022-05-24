@@ -382,7 +382,10 @@ void output_accesses_per_allocation(std::map<int, std::vector<h2m_pd_entry_t>> m
     }
 
     for(h2m_pd_base_allocation_t &a : list_allocs) {
-        std::string tmp_path = std::string(pathname) + "/alloc_" + std::to_string(a.id) + ".txt";
+        char str_id[4];
+        snprintf (str_id, 4, "%03d", a.id);
+        std::string tmp_path = std::string(pathname) + "/alloc_" + std::string(str_id) + ".txt";
+        // std::string tmp_path = std::string(pathname) + "/alloc_" + std::to_string(a.id) + ".txt";
         std::ofstream tmp_file(tmp_path);
         if(!tmp_file.is_open()) {
             fprintf(stderr, "WARNING: Could not open/write file %s.\n", tmp_path.c_str());

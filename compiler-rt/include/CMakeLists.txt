@@ -1,5 +1,6 @@
 if (COMPILER_RT_BUILD_SANITIZERS)
   set(SANITIZER_HEADERS
+    ../lib/asan/asan_h2m_pattern_detection.h
     sanitizer/allocator_interface.h
     sanitizer/asan_interface.h
     sanitizer/common_interface_defs.h
