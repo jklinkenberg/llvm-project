@@ -1,6 +1,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <algorithm>
 #include <atomic>
 #include <climits>
 #include <cstddef>
@@ -56,7 +57,7 @@ typedef struct h2m_pd_entry_t {
 } h2m_pd_entry_t;
 
 typedef struct h2m_pd_thread_data_t {
-    int os_thread_id;
+    pid_t os_thread_id;
     std::vector<h2m_pd_entry_t> mem_accesses;
 } h2m_pd_thread_data_t;
 
@@ -68,6 +69,7 @@ typedef struct h2m_pd_stack_trace_t {
 // FIXME: might need to use rw_lock if amount of data recorded grows too much
 std::mutex                              mtx_allocs;
 std::vector<h2m_pd_base_allocation_t>   list_allocs;
+int has_allocs = 0;
 
 std::mutex                              mtx_phases;
 std::vector<h2m_pd_phase_t>             list_phases;
@@ -155,13 +157,11 @@ void get_stack_trace(h2m_pd_stack_trace_t* st) {
 double h2m_pd_mysecond() {
     struct timeval tp;
     struct timezone tzp;
-    int i;
-
-    i = gettimeofday(&tp,&tzp);
+    gettimeofday(&tp,&tzp);
     return ( (double) tp.tv_sec + (double) tp.tv_usec * 1.e-6 );
 }
 
-int h2m_pd_get_gtid() {
+inline int h2m_pd_get_gtid() {
     if(__h2m_pd_gtid != -1) {
         return __h2m_pd_gtid;
     }
@@ -169,7 +169,7 @@ int h2m_pd_get_gtid() {
 #if H2M_PD_DEBUG
     fprintf(stderr, "Current thread = %d\n", __h2m_pd_gtid);
 #endif // H2M_PD_DEBUG
-    __thread_data[__h2m_pd_gtid].os_thread_id = syscall(SYS_gettid);
+    __thread_data[__h2m_pd_gtid].os_thread_id = gettid();
     return __h2m_pd_gtid;
 }
 
@@ -177,9 +177,14 @@ int h2m_pd_init(int n_threads) {
     fprintf(stderr, "Initialized with %d threads\n", n_threads);
     global_num_threads  = n_threads;
     __thread_data       = new h2m_pd_thread_data_t[n_threads];
+
+    for(int i = 0; i < n_threads; i++) {
+        __thread_data[i].mem_accesses.reserve(20000000);
+    }
     
     mtx_allocs.lock();
     list_allocs.clear();
+    has_allocs = 0;
     mtx_allocs.unlock();
 
     mtx_phases.lock();
@@ -216,6 +221,9 @@ int h2m_pd_register_allocation(void *ptr, size_t size, size_t dt_size) {
 
     mtx_allocs.lock();
     list_allocs.push_back(e);
+    if (!has_allocs) {
+        has_allocs = 1;
+    }
     mtx_allocs.unlock();
     return H2M_PD_SUCCESS;
 }
@@ -241,15 +249,19 @@ int h2m_pd_add_mem_access(void *ptr, size_t size, int is_write) {
     if (!h2m_pd_is_initialized) {
         return H2M_PD_FAILURE;
     }
+    if (!has_allocs) {
+        return H2M_PD_SUCCESS;
+    }
+
+    int gtid = h2m_pd_get_gtid();
 
     h2m_pd_entry_t e;
     e.ts        = h2m_pd_mysecond();
-    e.tid       = gettid();
+    e.tid       = __thread_data[gtid].os_thread_id;
     e.ptr       = ptr;
     e.size      = size;
     e.is_write  = is_write;
 
-    int gtid = h2m_pd_get_gtid();
     __thread_data[gtid].mem_accesses.push_back(e);
     return H2M_PD_SUCCESS;
 }
@@ -369,6 +381,12 @@ void output_accesses_per_allocation(std::map<int, std::vector<h2m_pd_entry_t>> m
         return;
     }
 
+    int down_sampling = 1; // default: output every sample
+    char *dsf = std::getenv("H2M_PD_DOWN_SAMPLING_FACTOR");
+    if(dsf) {
+        down_sampling = std::atoi(dsf);
+    }
+
     // check whether directory exists
     struct stat info;
     if (stat(pathname, &info) != 0) {
@@ -406,6 +424,7 @@ void output_accesses_per_allocation(std::map<int, std::vector<h2m_pd_entry_t>> m
                     << "RangeEnd;" << std::to_string(a.range_end) << ";"
                     << "TsAlloc;" << std::to_string(a.ts_alloc) << ";"
                     << "TsFree;" << std::to_string(a.ts_free) << ";"
+                    << "SamplingStep" << std::to_string(down_sampling) << ";"
                     << "CallSite;" << a.call_site
                     << std::endl;
 
@@ -416,16 +435,19 @@ void output_accesses_per_allocation(std::map<int, std::vector<h2m_pd_entry_t>> m
 #if H2M_PD_DEBUG
         printf("H2M PD - Mem Accesses for Registered Alloc: %p with size=%lld\n", a.ptr, a.size);
 #endif // H2M_PD_DEBUG
+        long ctr = 0;
         for(h2m_pd_entry_t &e : accs) {
-            tmp_file    << std::to_string(e.ts) << ";"
-                        << (long)e.tid << ";"
-                        << e.ptr << ";"
-                        << (unsigned long)e.ptr << ";"
-                        << e.size << ";"
-                        << e.is_write << std::endl;
+            if (ctr++ % down_sampling == 0) {
+                tmp_file    << std::to_string(e.ts) << ";"
+                            << (long)e.tid << ";"
+                            << e.ptr << ";"
+                            << (unsigned long)e.ptr << ";"
+                            << e.size << ";"
+                            << e.is_write << std::endl;
 #if H2M_PD_DEBUG
-            printf("   H2M PD - Access: ts=%s, tid=%lld, ptr=%p, size=%lld, is_write=%d\n", std::to_string(e.ts), (long)e.tid, e.ptr, e.size, e.is_write);
+                printf("   H2M PD - Access: ts=%s, tid=%lld, ptr=%p, size=%lld, is_write=%d\n", std::to_string(e.ts), (long)e.tid, e.ptr, e.size, e.is_write);
 #endif // H2M_PD_DEBUG
+            }
         }
         tmp_file.close();
     }

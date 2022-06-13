@@ -318,27 +318,27 @@ static void PoisonAlignedStackMemory(uptr addr, uptr size, bool do_poison) {
 }
 
 void __asan_set_shadow_00(uptr addr, uptr size) {
-  REAL(memset)((void *)addr, 0, size);
+  //REAL(memset)((void *)addr, 0, size);
 }
 
 void __asan_set_shadow_f1(uptr addr, uptr size) {
-  REAL(memset)((void *)addr, 0xf1, size);
+  //REAL(memset)((void *)addr, 0xf1, size);
 }
 
 void __asan_set_shadow_f2(uptr addr, uptr size) {
-  REAL(memset)((void *)addr, 0xf2, size);
+  //REAL(memset)((void *)addr, 0xf2, size);
 }
 
 void __asan_set_shadow_f3(uptr addr, uptr size) {
-  REAL(memset)((void *)addr, 0xf3, size);
+  //REAL(memset)((void *)addr, 0xf3, size);
 }
 
 void __asan_set_shadow_f5(uptr addr, uptr size) {
-  REAL(memset)((void *)addr, 0xf5, size);
+  //REAL(memset)((void *)addr, 0xf5, size);
 }
 
 void __asan_set_shadow_f8(uptr addr, uptr size) {
-  REAL(memset)((void *)addr, 0xf8, size);
+  //REAL(memset)((void *)addr, 0xf8, size);
 }
 
 void __asan_poison_stack_memory(uptr addr, uptr size) {
