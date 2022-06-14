@@ -58,6 +58,7 @@ typedef struct h2m_pd_entry_t {
 
 typedef struct h2m_pd_thread_data_t {
     pid_t os_thread_id;
+    int ctr_sampling;
     std::vector<h2m_pd_entry_t> mem_accesses;
 } h2m_pd_thread_data_t;
 
@@ -81,6 +82,7 @@ std::atomic<int>                        __id_counter_threads(0);
 __thread int                            __h2m_pd_gtid = -1;
 h2m_pd_thread_data_t*                   __thread_data = nullptr;
 
+int sampling_factor = 1; // default: record every sample
 int h2m_pd_is_initialized = 0;
 
 void string_split(const std::string& str, std::vector<std::string>& list, char delim) {
@@ -180,6 +182,7 @@ int h2m_pd_init(int n_threads) {
 
     for(int i = 0; i < n_threads; i++) {
         __thread_data[i].mem_accesses.reserve(20000000);
+        __thread_data[i].ctr_sampling = 0;
     }
     
     mtx_allocs.lock();
@@ -190,6 +193,11 @@ int h2m_pd_init(int n_threads) {
     mtx_phases.lock();
     list_phases.clear();
     mtx_phases.unlock();
+
+    char *sf = std::getenv("H2M_PD_SAMPLING_FACTOR");
+    if(sf) {
+        sampling_factor = std::atoi(sf);
+    }
 
     h2m_pd_is_initialized = 1;
     return H2M_PD_SUCCESS;
@@ -254,6 +262,15 @@ int h2m_pd_add_mem_access(void *ptr, size_t size, int is_write) {
     }
 
     int gtid = h2m_pd_get_gtid();
+
+    if (sampling_factor != 1) {
+        if(__thread_data[gtid].ctr_sampling % sampling_factor == 0) {
+            __thread_data[gtid].ctr_sampling = 1;
+        } else {
+            __thread_data[gtid].ctr_sampling++;
+            return H2M_PD_SUCCESS;
+        }
+    }
 
     h2m_pd_entry_t e;
     e.ts        = h2m_pd_mysecond();
@@ -381,12 +398,6 @@ void output_accesses_per_allocation(std::map<int, std::vector<h2m_pd_entry_t>> m
         return;
     }
 
-    int down_sampling = 1; // default: output every sample
-    char *dsf = std::getenv("H2M_PD_DOWN_SAMPLING_FACTOR");
-    if(dsf) {
-        down_sampling = std::atoi(dsf);
-    }
-
     // check whether directory exists
     struct stat info;
     if (stat(pathname, &info) != 0) {
@@ -424,7 +435,7 @@ void output_accesses_per_allocation(std::map<int, std::vector<h2m_pd_entry_t>> m
                     << "RangeEnd;" << std::to_string(a.range_end) << ";"
                     << "TsAlloc;" << std::to_string(a.ts_alloc) << ";"
                     << "TsFree;" << std::to_string(a.ts_free) << ";"
-                    << "SamplingStep" << std::to_string(down_sampling) << ";"
+                    << "SamplingFactor;" << std::to_string(sampling_factor) << ";"
                     << "CallSite;" << a.call_site
                     << std::endl;
 
@@ -435,19 +446,16 @@ void output_accesses_per_allocation(std::map<int, std::vector<h2m_pd_entry_t>> m
 #if H2M_PD_DEBUG
         printf("H2M PD - Mem Accesses for Registered Alloc: %p with size=%lld\n", a.ptr, a.size);
 #endif // H2M_PD_DEBUG
-        long ctr = 0;
         for(h2m_pd_entry_t &e : accs) {
-            if (ctr++ % down_sampling == 0) {
-                tmp_file    << std::to_string(e.ts) << ";"
-                            << (long)e.tid << ";"
-                            << e.ptr << ";"
-                            << (unsigned long)e.ptr << ";"
-                            << e.size << ";"
-                            << e.is_write << std::endl;
+            tmp_file    << std::to_string(e.ts) << ";"
+                        << (long)e.tid << ";"
+                        << e.ptr << ";"
+                        << (unsigned long)e.ptr << ";"
+                        << e.size << ";"
+                        << e.is_write << std::endl;
 #if H2M_PD_DEBUG
                 printf("   H2M PD - Access: ts=%s, tid=%lld, ptr=%p, size=%lld, is_write=%d\n", std::to_string(e.ts), (long)e.tid, e.ptr, e.size, e.is_write);
 #endif // H2M_PD_DEBUG
-            }
         }
         tmp_file.close();
     }
@@ -477,5 +485,6 @@ int h2m_pd_finalize() {
     }
     delete[] __thread_data;
     list_allocs.clear();
+    h2m_pd_is_initialized = 0;
     return H2M_PD_SUCCESS;
 }
