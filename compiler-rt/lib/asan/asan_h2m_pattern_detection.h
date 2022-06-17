@@ -19,6 +19,10 @@ typedef enum h2m_pd_result_types_t {
     H2M_PD_FAILURE      = 1,
 } h2m_pd_result_types_t;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int h2m_pd_init(int n_threads);
 int h2m_pd_register_allocation(void *ptr, size_t size, size_t dt_size);
 int h2m_pd_unregister_allocation(void *ptr);
@@ -26,4 +30,7 @@ int h2m_pd_add_mem_access(void *ptr, size_t size, int is_write);
 int h2m_pd_new_phase(const char* name);
 int h2m_pd_finalize();
 
+#ifdef __cplusplus
+}
+#endif
 #endif // __ASAN_H2M_PATTERN_DETECTION_H__

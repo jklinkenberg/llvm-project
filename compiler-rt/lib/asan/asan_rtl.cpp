@@ -305,6 +305,11 @@ static NOINLINE void force_interface_symbols() {
     case 43: __asan_set_shadow_f3(0, 0); break;
     case 44: __asan_set_shadow_f5(0, 0); break;
     case 45: __asan_set_shadow_f8(0, 0); break;
+    case 46: h2m_pd_init(0); break;
+    case 47: h2m_pd_finalize(); break;
+    case 48: h2m_pd_register_allocation(NULL, 0, 0); break;
+    case 49: h2m_pd_unregister_allocation(NULL); break;
+    case 50: h2m_pd_new_phase(""); break;
   }
   // clang-format on
 }

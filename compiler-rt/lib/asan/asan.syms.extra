@@ -2,3 +2,4 @@ __asan_*
 __lsan_*
 __ubsan_*
 __sancov_*
+h2m_pd_*
